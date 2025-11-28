@@ -1,0 +1,683 @@
+esphome:
+  name: "ttgo-t-call-esp32"
+  friendly_name: TTGO T-Call
+  includes:
+    - ttgo_nvs_helper.h
+  on_boot:
+    priority: -100
+    then:
+      - lambda: |-
+          id(boot_timestamp) = millis();
+          ESP_LOGI("boot", "Boot timestamp: %lu ms", id(boot_timestamp));
+      - logger.log: "Boot sequence started"
+      - wait_until:
+          binary_sensor.is_on: gsm_registered
+      - logger.log: "GSM registered, checking flag"
+      - if:
+          condition:
+            lambda: 'return !id(boot_sms_sent);'
+          then:
+            - logger.log: "Sending boot SMS"
+            - delay: 15s
+            - lambda: |-
+                std::string boot_num = id(boot_sms_number).state;
+                if (!boot_num.empty() && boot_num != "-") {
+                  auto time = id(homeassistant_time).now();
+                  char timestamp[20];
+                  sprintf(timestamp, "%02d.%02d.%04d %02d:%02d:%02d", 
+                          time.day_of_month, time.month, time.year,
+                          time.hour, time.minute, time.second);
+                  
+                  std::string message = "TTGO T-Call online - " + std::string(timestamp);
+                  id(ttgo_sim800l).send_sms(boot_num, message);
+                  id(boot_sms_sent) = true;
+                  ESP_LOGI("boot", "Boot SMS sent to %s", boot_num.c_str());
+                  ESP_LOGI("boot", "Flag boot_sms_sent set to true");
+                } else {
+                  ESP_LOGW("boot", "Boot SMS number is empty, skipping");
+                }
+            - logger.log: "Boot SMS sent"
+
+esp32:
+  board: esp32dev
+  framework:
+    type: esp-idf
+
+###########################################
+# CONNECTIVITY & SECRETS
+###########################################
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  power_save_mode: none
+  fast_connect: on
+  manual_ip:
+    static_ip: 0.0.0.0     # Completeaza IP-ul static
+    gateway: 0.0.0.0     # Completeza gateway-ul
+    subnet: 255.255.255.0     # Schimba daca este nevoie
+    dns1: 1.1.1.1     # Schimba daca este nevoie
+
+logger:
+  baud_rate: 0
+
+api:
+  encryption:
+    key: "CHANGE-ME"     # Completeaza API-key-ul tau
+  services:
+    - service: send_sms
+      variables:
+        recipient: string
+        message: string
+      then:
+        - sim800l.send_sms:
+            recipient: !lambda 'return recipient;'
+            message: !lambda 'return message;'
+    - service: dial
+      variables:
+        recipient: string
+      then:
+        - sim800l.dial:
+            recipient: !lambda 'return recipient;'
+    - service: connect
+      then:
+        - sim800l.connect
+    - service: disconnect
+      then:
+        - sim800l.disconnect
+    - service: send_ussd
+      variables:
+        ussdCode: string
+      then:
+        - sim800l.send_ussd:
+            ussd: !lambda 'return ussdCode;'
+
+ota:
+  - platform: esphome
+    password: !secret ota_password
+
+web_server:
+  local: true
+  port: 80
+  version: 2
+  auth:
+    username: !secret web_server_username
+    password: !secret web_server_password
+
+###########################################
+# TIME & GLOBALS
+###########################################
+
+time:
+  - platform: homeassistant
+    id: homeassistant_time
+    timezone: Europe/Bucharest
+    on_time_sync:
+      then:
+        - logger.log: "Ora sincronizata cu Home Assistant"
+  
+  - platform: sntp
+    id: sntp_time
+    timezone: Europe/Bucharest
+    servers:
+      - time.google.com
+      - 0.pool.ntp.org
+      - 1.pool.ntp.org
+    on_time_sync:
+      then:
+        - logger.log: "Ora sincronizata cu SNTP (backup)"
+
+globals:
+  - id: boot_sms_sent
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+  
+  - id: wifi_retry_count
+    type: int
+    restore_value: no
+    initial_value: '0'
+  
+  - id: last_gsm_update
+    type: unsigned long
+    restore_value: no
+    initial_value: '0'
+  
+  - id: boot_timestamp
+    type: unsigned long
+    restore_value: no
+    initial_value: '0'
+  
+  - id: nvs_clear_confirm
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+
+###########################################
+# UART & GSM MODULE
+###########################################
+
+uart:
+  baud_rate: 9600
+  tx_pin: 27
+  rx_pin: 26
+
+###########################################
+# SENSORS & BINARY SENSORS
+###########################################
+
+sensor:
+  - platform: sim800l
+    rssi:
+      name: "GSM Signal Strength"
+      id: gsm_rssi
+      icon: "mdi:signal"
+      entity_category: "diagnostic"
+      unit_of_measurement: "dBm"
+      internal: true
+
+  - platform: wifi_signal
+    name: "WiFi Signal"
+    id: wifi_signal_db
+    icon: "mdi:wifi"
+    entity_category: "diagnostic"
+    update_interval: 300s
+    internal: true
+
+  - platform: uptime
+    name: "Uptime"
+    id: uptime_seconds
+    entity_category: "diagnostic"
+    update_interval: 60s
+    internal: true
+  
+  - platform: internal_temperature
+    name: "ESP32 Temperature"
+    icon: "mdi:thermometer"
+    entity_category: "diagnostic"
+    update_interval: 60s
+  
+  - platform: template
+    name: "WiFi Signal Percent"
+    unit_of_measurement: "%"
+    icon: "mdi:wifi"
+    entity_category: "diagnostic"
+    update_interval: 300s
+    accuracy_decimals: 0
+    lambda: |-
+      float dbm = id(wifi_signal_db).state;
+      if (isnan(dbm)) {
+        return 0;
+      }
+      float quality;
+      if (dbm <= -100) {
+        quality = 0;
+      } else if (dbm >= -50) {
+        quality = 100;
+      } else {
+        quality = 2 * (dbm + 100);
+      }
+      return quality;
+  
+  - platform: template
+    name: "GSM Signal Percent"
+    unit_of_measurement: "%"
+    icon: "mdi:signal"
+    entity_category: "diagnostic"
+    update_interval: 60s
+    accuracy_decimals: 0
+    lambda: |-
+      float dbm = id(gsm_rssi).state;
+      if (isnan(dbm)) {
+        return 0;
+      }
+      float quality;
+      if (dbm <= -110) {
+        quality = 0;
+      } else if (dbm >= -51) {
+        quality = 100;
+      } else {
+        quality = ((dbm + 110) / 59.0) * 100;
+      }
+      return quality;
+  
+  - platform: template
+    name: "NVS Usage"
+    unit_of_measurement: "%"
+    icon: "mdi:memory"
+    accuracy_decimals: 0
+    entity_category: "diagnostic"
+    update_interval: 300s
+    lambda: |-
+      return get_nvs_usage();
+
+binary_sensor:
+  - platform: template
+    name: "WiFi Connected"
+    id: wifi_connected
+    device_class: connectivity
+    entity_category: diagnostic
+    lambda: |-
+      return wifi::global_wifi_component->is_connected();
+  
+  - platform: template
+    name: "GSM Alive"
+    id: gsm_alive
+    device_class: connectivity
+    entity_category: diagnostic
+    lambda: |-
+      unsigned long now = millis();
+      unsigned long last = id(last_gsm_update);
+      
+      bool rssi_valid = !isnan(id(gsm_rssi).state);
+      bool registered = id(gsm_registered).state;
+      
+      if (rssi_valid && registered) {
+        id(last_gsm_update) = now;
+        return true;
+      }
+      
+      if (last > 0 && (now - last) > 300000) {
+        ESP_LOGW("watchdog", "GSM NU COMUNICA de 5 minute!");
+        return false;
+      }
+      
+      return (last > 0);
+  
+  - platform: sim800l
+    registered:
+      name: "GSM Network Registered"
+      id: gsm_registered
+      icon: "mdi:network"
+      entity_category: "diagnostic"
+      on_press:
+        - logger.log: "GSM reconnected"
+        - if:
+            condition:
+              lambda: 'return !id(boot_sms_sent);'
+            then:
+              - logger.log: "Sending reconnect SMS"
+              - delay: 15s
+              - lambda: |-
+                  std::string boot_num = id(boot_sms_number).state;
+                  if (!boot_num.empty() && boot_num != "-") {
+                    auto time = id(homeassistant_time).now();
+                    char timestamp[20];
+                    sprintf(timestamp, "%02d.%02d.%04d %02d:%02d:%02d", 
+                            time.day_of_month, time.month, time.year,
+                            time.hour, time.minute, time.second);
+                    
+                    std::string message = "TTGO T-Call online - " + std::string(timestamp);
+                    id(ttgo_sim800l).send_sms(boot_num, message);
+                  }
+              - globals.set:
+                  id: boot_sms_sent
+                  value: 'true'
+
+  - platform: status
+    name: "Device Status"
+    entity_category: "diagnostic"
+
+###########################################
+# GSM MODULE (SIM800L)
+###########################################
+
+sim800l:
+  id: ttgo_sim800l
+  on_sms_received:
+    - lambda: |-
+        std::string allowed_numbers[] = {
+          id(whitelist_1).state,
+          id(whitelist_2).state,
+          id(whitelist_3).state,
+          id(whitelist_4).state,
+          id(whitelist_5).state
+        };
+        
+        bool allowed = false;
+        for (auto &num : allowed_numbers) {
+          if (!num.empty() && num != "-" && sender == num) {
+            allowed = true;
+            break;
+          }
+        }
+        
+        if (allowed) {
+          ESP_LOGI("sms", "SMS ACCEPTED from %s: %s", sender.c_str(), message.c_str());
+          
+          // ==========================================
+          // SMS COMMANDS - ADD YOUR COMMANDS HERE
+          // ==========================================
+          
+          // SMS: "aprinde-test" -> switch.sonoff_1000c8fe88 turn_on
+          if (message == "aprinde-test") {
+            id(btn_trigger_on).press();
+          }
+          
+          // SMS: "stinge-test" -> switch.sonoff_1000c8fe88 turn_off
+          if (message == "stinge-test") {
+            id(btn_trigger_off).press();
+          }
+          
+          // ==========================================
+          // END SMS COMMANDS
+          // ==========================================
+          
+        } else {
+          ESP_LOGW("sms", "SMS BLOCKED from %s", sender.c_str());
+        }
+        
+  on_incoming_call:
+    - lambda: |-
+        std::string allowed_numbers[] = {
+          id(whitelist_1).state,
+          id(whitelist_2).state,
+          id(whitelist_3).state,
+          id(whitelist_4).state,
+          id(whitelist_5).state
+        };
+        
+        bool allowed = false;
+        for (auto &num : allowed_numbers) {
+          if (!num.empty() && num != "-" && caller_id == num) {
+            allowed = true;
+            break;
+          }
+        }
+        
+        if (allowed) {
+          ESP_LOGI("call", "CALL ACCEPTED from %s", caller_id.c_str());
+        } else {
+          ESP_LOGW("call", "CALL BLOCKED from %s", caller_id.c_str());
+          id(ttgo_sim800l).disconnect();
+        }
+    
+  on_call_connected:
+    - logger.log:
+        format: "Call connected"
+        
+  on_call_disconnected:
+    - logger.log:
+        format: "Call disconnected"
+
+###########################################
+# LIGHTS & SWITCHES
+###########################################
+
+light:
+  - platform: status_led
+    name: "Status LED"
+    pin: GPIO13
+    id: ttgo_status_led
+
+switch: 
+   - platform: gpio 
+     name: "SIM800_PWKEY" 
+     pin: 4 
+     restore_mode: ALWAYS_OFF 
+     internal: true 
+   - platform: gpio 
+     name: "SIM800_RST" 
+     pin: 5 
+     restore_mode: ALWAYS_ON 
+     internal: true 
+   - platform: gpio 
+     name: "SIM800_POWER" 
+     pin: 23 
+     restore_mode: ALWAYS_ON 
+     internal: true
+
+###########################################
+# TEXT SENSORS & INPUTS
+###########################################
+
+text_sensor:
+  - platform: template
+    name: "WiFi Status"
+    id: wifi_status_sensor
+    icon: "mdi:wifi"
+    update_interval: 60s
+    entity_category: diagnostic
+    lambda: |-
+      if (wifi::global_wifi_component->is_connected()) {
+        return {"WiFi OK"};
+      } else {
+        int count = id(wifi_retry_count);
+        char status[20];
+        sprintf(status, "Retry (%d/5)", count);
+        return {(std::string)status};
+      }
+  
+  - platform: template
+    name: "ESP Time"
+    icon: "mdi:clock-outline"
+    update_interval: 1s
+    entity_category: diagnostic
+    lambda: |-
+      char time_str[20];
+      auto time = id(homeassistant_time).now();
+      if (time.is_valid()) {
+        sprintf(time_str, "%02d:%02d %02d.%02d.%04d", 
+                time.hour, time.minute,
+                time.day_of_month, time.month, time.year);
+        return {(std::string)time_str};
+      }
+      return {"N/A"};
+  
+  - platform: template
+    name: "Uptime Formatted"
+    icon: "mdi:clock-start"
+    lambda: |-
+      int seconds = (int) id(uptime_seconds).state;
+      int days = seconds / 86400;
+      seconds %= 86400;
+      int hours = seconds / 3600;
+      seconds %= 3600;
+      int minutes = seconds / 60;
+      if (days > 0) {
+        return esphome::str_sprintf("%d days %02dh %02dm", days, hours, minutes);
+      } else if (hours > 0) {
+        return esphome::str_sprintf("%02dh %02dm", hours, minutes);
+      } else {
+        return esphome::str_sprintf("%02dm", minutes);
+      }
+    update_interval: 60s
+
+  - platform: wifi_info
+    ip_address:
+      name: "IP Address"
+      entity_category: "diagnostic"
+    mac_address:
+      name: "MAC Address"
+      entity_category: "diagnostic"
+
+###########################################
+# WATCHDOG INTERVALS
+###########################################
+
+interval:
+  - interval: 60s
+    then:
+      - lambda: |-
+          bool wifi_ok = wifi::global_wifi_component->is_connected();
+          
+          if (wifi_ok) {
+            if (id(wifi_retry_count) != 0) {
+              ESP_LOGI("watchdog", "WiFi reconectat!");
+            }
+            id(wifi_retry_count) = 0;
+          } else {
+            id(wifi_retry_count) += 1;
+            int count = id(wifi_retry_count);
+            ESP_LOGW("watchdog", "WiFi deconectat - Retry %d/5", count);
+            if (count >= 5) {
+              ESP_LOGW("watchdog", "=== WIFI DECONECTAT 5 MINUTE! RESTART! ===");
+              App.safe_reboot();
+            }
+          }
+  
+  - interval: 60s
+    then:
+      - lambda: |-
+          unsigned long now = millis();
+          unsigned long last = id(last_gsm_update);
+          if (last > 0 && (now - last) > 300000) {
+            ESP_LOGW("watchdog", "=== GSM BLOCAT 5 MIN! RESTART! ===");
+            App.safe_reboot();
+          }
+
+text:
+  - platform: template
+    name: "Boot SMS Number"
+    id: boot_sms_number
+    optimistic: true
+    initial_value: "-"
+    mode: text
+    icon: "mdi:phone-alert"
+    restore_value: true
+
+  - platform: template
+    name: "SMS Recipient"
+    id: sms_recipient
+    optimistic: true
+    initial_value: "+40"
+    mode: text
+    icon: "mdi:phone"
+  
+  - platform: template
+    name: "SMS Message Text"
+    id: sms_text
+    optimistic: true
+    initial_value: "-"
+    mode: text
+    icon: "mdi:message-text"
+  
+  - platform: template
+    name: "Whitelist 1"
+    id: whitelist_1
+    optimistic: true
+    mode: text
+    icon: "mdi:account-check"
+    restore_value: true
+    initial_value: "-"
+  
+  - platform: template
+    name: "Whitelist 2"
+    id: whitelist_2
+    optimistic: true
+    mode: text
+    icon: "mdi:account-check"
+    restore_value: true
+    initial_value: "-"
+  
+  - platform: template
+    name: "Whitelist 3"
+    id: whitelist_3
+    optimistic: true
+    mode: text
+    icon: "mdi:account-check"
+    restore_value: true
+    initial_value: "-"
+  
+  - platform: template
+    name: "Whitelist 4"
+    id: whitelist_4
+    optimistic: true
+    mode: text
+    icon: "mdi:account-check"
+    restore_value: true
+    initial_value: "-"
+  
+  - platform: template
+    name: "Whitelist 5"
+    id: whitelist_5
+    optimistic: true
+    mode: text
+    icon: "mdi:account-check"
+    restore_value: true
+    initial_value: "-"
+
+###########################################
+# SMS TRIGGER BUTTONS - START
+###########################################
+
+button:
+  - platform: template
+    name: "SMS Trigger On"
+    id: btn_trigger_on
+    internal: true
+    on_press:
+      - homeassistant.service:
+          service: switch.turn_on
+          data:
+            entity_id: switch.sonoff_1000c8fe88
+  
+  - platform: template
+    name: "SMS Trigger Off"
+    id: btn_trigger_off
+    internal: true
+    on_press:
+      - homeassistant.service:
+          service: switch.turn_off
+          data:
+            entity_id: switch.sonoff_1000c8fe88
+
+###########################################
+# SMS TRIGGER BUTTONS - END
+###########################################
+
+  - platform: restart
+    name: "Restart"
+    icon: "mdi:restart"
+    entity_category: diagnostic
+  
+  - platform: template
+    name: "Clear NVS"
+    icon: "mdi:delete-sweep"
+    entity_category: diagnostic
+    on_press:
+      - lambda: |-
+          unsigned long now = millis();
+          unsigned long boot = id(boot_timestamp);
+          unsigned long elapsed = (now - boot) / 1000;
+          
+          if ((now - boot) < 120000) {
+            ESP_LOGW("nvs", "Asteapta 2 minute dupa boot! (trecut: %lu sec)", elapsed);
+            return;
+          }
+          
+          if (!id(nvs_clear_confirm)) {
+            id(nvs_clear_confirm) = true;
+            ESP_LOGW("nvs", "Apasa din nou in 10 secunde pentru confirmare!");
+          } else {
+            id(nvs_clear_confirm) = false;
+            ESP_LOGW("nvs", "=== CLEAR NVS CONFIRMAT ===");
+            do_nvs_erase();
+            ESP_LOGI("nvs", "NVS sters! Restart...");
+          }
+      - if:
+          condition:
+            lambda: 'return id(nvs_clear_confirm);'
+          then:
+            - delay: 10s
+            - lambda: |-
+                id(nvs_clear_confirm) = false;
+                ESP_LOGI("nvs", "Timeout - anulat");
+          else:
+            - delay: 1s
+            - lambda: |-
+                App.safe_reboot();
+  
+  - platform: template
+    name: "Send SMS"
+    icon: "mdi:send"
+    on_press:
+      - lambda: |-
+          auto time = id(homeassistant_time).now();
+          char timestamp[20];
+          sprintf(timestamp, "%02d.%02d.%04d %02d:%02d:%02d", 
+                  time.day_of_month, time.month, time.year,
+                  time.hour, time.minute, time.second);
+          
+          std::string message = id(sms_text).state + " - " + std::string(timestamp);
+          id(ttgo_sim800l).send_sms(id(sms_recipient).state, message);
