@@ -28,7 +28,7 @@ esphome:
                           time.day_of_month, time.month, time.year,
                           time.hour, time.minute, time.second);
                   
-                  std::string message = "TTGO T-Call online - " + std::string(timestamp);
+                  std::string message = "Modul TTGO T-Call online - " + std::string(timestamp);
                   id(ttgo_sim800l).send_sms(boot_num, message);
                   id(boot_sms_sent) = true;
                   ESP_LOGI("boot", "Boot SMS sent to %s", boot_num.c_str());
@@ -53,17 +53,17 @@ wifi:
   power_save_mode: none
   fast_connect: on
   manual_ip:
-    static_ip: 0.0.0.0     # Completeaza IP-ul static
-    gateway: 0.0.0.0     # Completeza gateway-ul
-    subnet: 255.255.255.0     # Schimba daca este nevoie
-    dns1: 1.1.1.1     # Schimba daca este nevoie
+    static_ip: 10.10.9.203
+    gateway: 10.10.9.254
+    subnet: 255.255.255.0
+    dns1: 1.1.1.1
 
 logger:
   baud_rate: 0
 
 api:
   encryption:
-    key: "CHANGE-ME"     # Completeaza API-key-ul tau
+    key: "VNa4H1OCbHOT4AsJgR2RQzYDF4Q7LC8BrXLoCDRvLxM="
   services:
     - service: send_sms
       variables:
@@ -227,18 +227,14 @@ sensor:
     update_interval: 60s
     accuracy_decimals: 0
     lambda: |-
-      float dbm = id(gsm_rssi).state;
-      if (isnan(dbm)) {
+      float raw = id(gsm_rssi).state;
+      if (isnan(raw)) {
         return 0;
       }
-      float quality;
-      if (dbm <= -110) {
-        quality = 0;
-      } else if (dbm >= -51) {
-        quality = 100;
-      } else {
-        quality = ((dbm + 110) / 59.0) * 100;
-      }
+      float dbm = (raw * 2) - 113;
+      float quality = ((dbm + 113) / 62.0) * 100;
+      if (quality > 100) quality = 100;
+      if (quality < 0) quality = 0;
       return quality;
   
   - platform: template
@@ -307,7 +303,7 @@ binary_sensor:
                             time.day_of_month, time.month, time.year,
                             time.hour, time.minute, time.second);
                     
-                    std::string message = "TTGO T-Call online - " + std::string(timestamp);
+                    std::string message = "Modul TTGO T-Call online - " + std::string(timestamp);
                     id(ttgo_sim800l).send_sms(boot_num, message);
                   }
               - globals.set:
